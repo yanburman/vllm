@@ -360,8 +360,8 @@ class ModelConfig:
         # Return true if the model is mamba.
         # This check should be augmented with more models in the future,
         # and made more robust if possible.
-        if hasattr(self.hf_text_config,
-                   "model_type") and self.hf_text_config.model_type == 'mamba':
+        if (hasattr(self.hf_text_config, "model_type")
+                and (self.hf_text_config.model_type in ['mamba', 'mamba2'])):
             return True
         return False
 
@@ -488,7 +488,7 @@ class ModelConfig:
         num_layers = self.get_num_layers(parallel_config)
 
         if self.is_attention_free():
-            assert (self.hf_config.model_type == "mamba")
+            assert (self.hf_config.model_type in ["mamba", "mamba2"])
             return ["mamba"] * num_layers
 
         # Transformers supports layers_block_type @property
