@@ -6,7 +6,7 @@ from typing import Iterable, List, Optional, Tuple
 import torch
 from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 from mamba_ssm.ops.triton.selective_state_update import selective_state_update
-from mamba_ssm.ops.triton.ssd_combined import (mamba_chunk_scan_combined)
+from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined
 from torch import nn
 from torch.nn.parameter import Parameter
 from transformers import MambaConfig
@@ -14,7 +14,8 @@ from transformers import MambaConfig
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.distributed import (get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size)
+                              get_tensor_model_parallel_world_size,
+                              tensor_model_parallel_all_gather)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -45,12 +46,20 @@ class MambaCacheParams:
     ssm_state: torch.Tensor = torch.Tensor()
 
 
+# Load weights that are sharded along axis 0
+def sharded_weight_loader(param: Parameter, loaded_weight: torch.Tensor):
+    tp_rank = get_tensor_model_parallel_rank()
+    param.data.copy_(
+        loaded_weight.data.split(param.data.shape[0], dim=0)[tp_rank])
+
+
 class MambaRMSNormGated(torch.nn.Module):
 
     def __init__(self, hidden_size, eps=1e-6):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
+        set_weight_attrs(self.weight, {"weight_loader": sharded_weight_loader})
 
     def forward(self, hidden_states, gate=None):
         input_dtype = hidden_states.dtype
@@ -64,6 +73,7 @@ class MambaRMSNormGated(torch.nn.Module):
                                                     self.variance_epsilon)
 
         return self.weight * hidden_states.to(input_dtype)
+
 
 # Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
 class MambaMixer(nn.Module):
@@ -81,6 +91,7 @@ class MambaMixer(nn.Module):
         super().__init__()
         self.config = config
 
+        self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads = config.num_heads
         self.layer_idx = layer_idx
         self.hidden_size = config.hidden_size
@@ -114,15 +125,14 @@ class MambaMixer(nn.Module):
         # doesn't allow to override it
         self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
 
-        projection_size = (self.intermediate_size + self.conv_dim +
-                           self.num_heads)
-        self.in_proj = ColumnParallelLinear(self.hidden_size,
-                                            projection_size,
-                                            bias=self.use_bias)
+        self.in_proj = MergedColumnParallelLinear(
+            self.hidden_size,
+            [self.intermediate_size, self.conv_dim, self.num_heads],
+            bias=self.use_bias)
 
         # time step projection (discretization)
         # instantiate once and copy inv_dt in init_weights of PretrainedModel
-        self.dt_bias = nn.Parameter(torch.ones(self.num_heads))
+        self.dt_bias = nn.Parameter(torch.ones(self.num_heads // self.tp_size))
 
         # time step projection (discretization) -
         # In the forward we need to apply dt_proj without the bias,
@@ -132,33 +142,18 @@ class MambaMixer(nn.Module):
                                             bias=True,
                                             skip_bias_add=True)
 
-        def weight_loader(param: Parameter, loaded_weight: torch.Tensor):
-            tp_rank = get_tensor_model_parallel_rank()
-            tp_size = get_tensor_model_parallel_world_size()
-            param.data.copy_(
-                loaded_weight.data.split(loaded_weight.shape[0] // tp_size,
-                                         dim=0)[tp_rank])
-
         def A_weight_loader(param: Parameter, loaded_weight: torch.Tensor):
-            weight_loader(param, -torch.exp(loaded_weight.float()))
+            sharded_weight_loader(param, -torch.exp(loaded_weight.float()))
 
-        # TODO: Figure out tensor parallelism for A and D.
-        # tp_size = get_tensor_model_parallel_world_size()
-        # In mamba.py A is
-        #  self.intermediate_size // tp_size by self.ssm_state_size,
-        # D is a vector of size self.intermediate_size // tp_size
-        # For mamba2 they are much smaller
-
-        # A = torch.arange(1, self.num_heads + 1)
-        # self.A_log = nn.Parameter(torch.log(A))
-        self.A = nn.Parameter(torch.ones(self.num_heads))
-        self.norm = MambaRMSNormGated(self.intermediate_size,
+        self.A = nn.Parameter(torch.ones(self.num_heads // self.tp_size))
+        self.D = nn.Parameter(torch.ones(self.num_heads // self.tp_size))
+        self.norm = MambaRMSNormGated(self.intermediate_size // self.tp_size,
                                       eps=self.layer_norm_epsilon)
 
-        self.D = nn.Parameter(torch.ones(self.num_heads))
-
-        set_weight_attrs(self.D, {"weight_loader": weight_loader})
+        set_weight_attrs(self.D, {"weight_loader": sharded_weight_loader})
         set_weight_attrs(self.A, {"weight_loader": A_weight_loader})
+        set_weight_attrs(self.dt_bias,
+                         {"weight_loader": sharded_weight_loader})
 
         self.out_proj = RowParallelLinear(
             self.intermediate_size,
@@ -174,17 +169,15 @@ class MambaMixer(nn.Module):
         # set up dimensions for reshapes later
         batch_size, seq_len, _ = hidden_states.shape
         groups_time_state_size = self.n_groups * self.ssm_state_size
-        d_to_remove = (2 * self.intermediate_size +
-                       2 * self.n_groups * self.ssm_state_size +
-                       self.num_heads)
+        d_to_remove = (2 * self.intermediate_size + 2 * self.n_groups *
+                       self.ssm_state_size + self.num_heads) // self.tp_size
 
         if cache_params is not None and not cache_params.is_prompt:
-            in_projected_states, _ = self.in_proj(
-                hidden_states.squeeze(1))  # (B 2D)
+            in_projected_states, _ = self.in_proj(hidden_states.squeeze(1))
             d_mlp = (in_projected_states.shape[-1] - d_to_remove) // 2
             split_projection_dim = [
-                d_mlp, d_mlp, self.intermediate_size, self.conv_dim,
-                self.num_heads
+                d_mlp, d_mlp, self.intermediate_size // self.tp_size,
+                self.conv_dim // self.tp_size, self.num_heads // self.tp_size
             ]
             _, _, gate, hidden_states_B_C, dt = torch.split(
                 in_projected_states, split_projection_dim, dim=-1)
@@ -197,14 +190,18 @@ class MambaMixer(nn.Module):
                 self.activation,
             )
 
-            hidden_states, B, C = torch.split(
+            hidden_states, B_C = torch.split(
                 hidden_states_B_C,
                 [
-                    self.intermediate_size, groups_time_state_size,
-                    groups_time_state_size
+                    self.intermediate_size // self.tp_size,
+                    2 * groups_time_state_size // self.tp_size
                 ],
                 dim=-1,
             )
+
+            B_C = tensor_model_parallel_all_gather(B_C.contiguous())
+            B, C = torch.split(
+                B_C, [groups_time_state_size, groups_time_state_size], dim=-1)
 
             A = self.A[:, None, ...][:, :, None].expand(
                 -1, self.head_dim, self.ssm_state_size).to(dtype=torch.float32)
@@ -214,7 +211,7 @@ class MambaMixer(nn.Module):
             B = B.view(batch_size, self.n_groups, B.shape[1] // self.n_groups)
             C = C.view(batch_size, self.n_groups, C.shape[1] // self.n_groups)
             hidden_states_reshaped = hidden_states.view(
-                batch_size, self.num_heads, self.head_dim)
+                batch_size, self.num_heads // self.tp_size, self.head_dim)
             hidden_states = selective_state_update(
                 cache_params.ssm_state,
                 hidden_states_reshaped,
@@ -227,8 +224,8 @@ class MambaMixer(nn.Module):
                 dt_bias=dt_bias,
                 dt_softplus=True,
             )
-            hidden_states = hidden_states.view(batch_size,
-                                               self.num_heads * self.head_dim)
+            hidden_states = hidden_states.view(
+                batch_size, self.num_heads // self.tp_size * self.head_dim)
             hidden_states = self.norm(hidden_states, gate)
             out = self.out_proj(hidden_states)[0][:, None, ...]
         # if no cache is found, calling the kernel
@@ -253,7 +250,10 @@ class MambaMixer(nn.Module):
 
             gate, hidden_states_B_C, time_step = torch.split(
                 projected_states,
-                [self.intermediate_size, self.conv_dim, self.num_heads],
+                [
+                    self.intermediate_size // self.tp_size, self.conv_dim //
+                    self.tp_size, self.num_heads // self.tp_size
+                ],
                 dim=-1,
             )
 
@@ -273,14 +273,21 @@ class MambaMixer(nn.Module):
                     bias=self.conv1d.bias,
                     activation=self.activation,
                 ).transpose(1, 2)[:, :seq_len]
-            hidden_states, B, C = torch.split(
+
+            hidden_states, B_C = torch.split(
                 hidden_states_B_C,
                 [
-                    self.intermediate_size, groups_time_state_size,
-                    groups_time_state_size
+                    self.intermediate_size // self.tp_size,
+                    2 * groups_time_state_size // self.tp_size
                 ],
                 dim=-1,
             )
+
+            # Allgather on B and C needed
+            B_C = tensor_model_parallel_all_gather(B_C.contiguous())
+            B, C = torch.split(
+                B_C, [groups_time_state_size, groups_time_state_size], dim=-1)
+
             # if (attention_mask is not None
             #     and attention_mask.shape[1] > 1
             #     and attention_mask.shape[0] > 1:
