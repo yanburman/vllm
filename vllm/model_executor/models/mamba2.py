@@ -6,8 +6,7 @@ from typing import Iterable, List, Optional, Tuple
 import torch
 from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
 from mamba_ssm.ops.triton.selective_state_update import selective_state_update
-from mamba_ssm.ops.triton.ssd_combined import (
-    mamba_chunk_scan_combined, mamba_split_conv1d_scan_combined)
+from mamba_ssm.ops.triton.ssd_combined import (mamba_chunk_scan_combined)
 from torch import nn
 from torch.nn.parameter import Parameter
 from transformers import MambaConfig
@@ -65,7 +64,6 @@ class MambaRMSNormGated(torch.nn.Module):
                                                     self.variance_epsilon)
 
         return self.weight * hidden_states.to(input_dtype)
-
 
 # Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
 class MambaMixer(nn.Module):
@@ -174,7 +172,6 @@ class MambaMixer(nn.Module):
                       hidden_states: torch.Tensor,
                       cache_params: MambaCacheParams = None):
         # set up dimensions for reshapes later
-
         batch_size, seq_len, _ = hidden_states.shape
         groups_time_state_size = self.n_groups * self.ssm_state_size
         d_to_remove = (2 * self.intermediate_size +
@@ -236,7 +233,6 @@ class MambaMixer(nn.Module):
             out = self.out_proj(hidden_states)[0][:, None, ...]
         # if no cache is found, calling the kernel
         else:
-
             #TODO: Handle this if needed
             # if (attention_mask is not None
             #     and attention_mask.shape[1] > 1
@@ -255,87 +251,64 @@ class MambaMixer(nn.Module):
                     "dt_limit": self.time_step_limit
                 }
 
-            if self.training and cache_params is None:
-                out, ssm_state = mamba_split_conv1d_scan_combined(
-                    projected_states,
-                    self.conv1d.weight.squeeze(1),
-                    self.conv1d.bias,
-                    self.dt_bias,
-                    A=self.A,
-                    D=self.D,
-                    chunk_size=self.chunk_size,
-                    seq_idx=None,  # was seq_idx
-                    activation=self.activation,
-                    rmsnorm_weight=self.norm.weight,
-                    rmsnorm_eps=self.norm.variance_epsilon,
-                    outproj_weight=self.out_proj.weight,
-                    outproj_bias=self.out_proj.bias,
-                    headdim=self.head_dim,
-                    ngroups=self.n_groups,
-                    norm_before_gate=self.norm_before_gate,
-                    return_final_states=True,
-                    **dt_limit_kwargs,
-                )
+            gate, hidden_states_B_C, time_step = torch.split(
+                projected_states,
+                [self.intermediate_size, self.conv_dim, self.num_heads],
+                dim=-1,
+            )
 
+            time_step = nn.functional.softplus(time_step + self.dt_bias)
+            # 1D Convolution
+            if causal_conv1d_fn is None or self.activation not in [
+                    "silu", "swish"
+            ]:
+                hidden_states_B_C = self.act(
+                    self.conv1d(hidden_states_B_C.transpose(1, 2)).transpose(
+                        1, 2)[:, :seq_len]
+                )  # (B, L, self.d_inner + 2 * ngroups * d_state)
             else:
-                gate, hidden_states_B_C, time_step = torch.split(
-                    projected_states,
-                    [self.intermediate_size, self.conv_dim, self.num_heads],
-                    dim=-1,
-                )
-
-                time_step = nn.functional.softplus(time_step + self.dt_bias)
-                # 1D Convolution
-                if causal_conv1d_fn is None or self.activation not in [
-                        "silu", "swish"
-                ]:
-                    hidden_states_B_C = self.act(
-                        self.conv1d(hidden_states_B_C.transpose(
-                            1, 2)).transpose(1, 2)[:, :seq_len]
-                    )  # (B, L, self.d_inner + 2 * ngroups * d_state)
-                else:
-                    hidden_states_B_C = causal_conv1d_fn(
-                        x=hidden_states_B_C.transpose(1, 2),
-                        weight=self.conv1d.weight.squeeze(1),
-                        bias=self.conv1d.bias,
-                        activation=self.activation,
-                    ).transpose(1, 2)[:, :seq_len]
-                hidden_states, B, C = torch.split(
-                    hidden_states_B_C,
-                    [
-                        self.intermediate_size, groups_time_state_size,
-                        groups_time_state_size
-                    ],
-                    dim=-1,
-                )
-                # if (attention_mask is not None
-                #     and attention_mask.shape[1] > 1
-                #     and attention_mask.shape[0] > 1:
-                #
-                #     # tune out hidden states for pad tokens,
-                #     # see https://github.com/state-spaces/mamba/issues/66
-                #     dtype = hidden_states.dtype
-                #     hidden_states = (hidden_states *
-                #                      attention_mask[:, :, None]).to(dtype)
-                scan_output, ssm_state = mamba_chunk_scan_combined(
-                    hidden_states.view(batch_size, seq_len, -1, self.head_dim),
-                    time_step,
-                    self.A,
-                    B.view(batch_size, seq_len, self.n_groups, -1),
-                    C.view(batch_size, seq_len, self.n_groups, -1),
-                    chunk_size=self.chunk_size,
-                    D=self.D,
-                    z=None,
-                    seq_idx=None,
-                    return_final_states=True,
-                    **dt_limit_kwargs,
-                )
-                if ssm_state is not None and cache_params is not None:
-                    cache_params.ssm_state.copy_(ssm_state)
-                scan_output = scan_output.view(batch_size, seq_len, -1)
-                # Multiply "gate" branch and apply extra normalization layer
-                scan_output = self.norm(scan_output, gate)
-                out = self.out_proj(scan_output)
+                hidden_states_B_C = causal_conv1d_fn(
+                    x=hidden_states_B_C.transpose(1, 2),
+                    weight=self.conv1d.weight.squeeze(1),
+                    bias=self.conv1d.bias,
+                    activation=self.activation,
+                ).transpose(1, 2)[:, :seq_len]
+            hidden_states, B, C = torch.split(
+                hidden_states_B_C,
+                [
+                    self.intermediate_size, groups_time_state_size,
+                    groups_time_state_size
+                ],
+                dim=-1,
+            )
+            # if (attention_mask is not None
+            #     and attention_mask.shape[1] > 1
+            #     and attention_mask.shape[0] > 1:
+            #
+            #     # tune out hidden states for pad tokens,
+            #     # see https://github.com/state-spaces/mamba/issues/66
+            #     dtype = hidden_states.dtype
+            #     hidden_states = (hidden_states *
+            #                      attention_mask[:, :, None]).to(dtype)
+            scan_output, ssm_state = mamba_chunk_scan_combined(
+                hidden_states.view(batch_size, seq_len, -1, self.head_dim),
+                time_step,
+                self.A,
+                B.view(batch_size, seq_len, self.n_groups, -1),
+                C.view(batch_size, seq_len, self.n_groups, -1),
+                chunk_size=self.chunk_size,
+                D=self.D,
+                z=None,
+                seq_idx=None,
+                return_final_states=True,
+                **dt_limit_kwargs,
+            )
+            if ssm_state is not None and cache_params is not None:
+                cache_params.ssm_state.copy_(ssm_state)
+            scan_output = scan_output.view(batch_size, seq_len, -1)
+            # Multiply "gate" branch and apply extra normalization layer
+            scan_output = self.norm(scan_output, gate)
+            out = self.out_proj(scan_output)
         return out
 
     def forward(
