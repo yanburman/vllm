@@ -266,9 +266,13 @@ class PlaceholderAttentionMetadataBuilder(
                      dtype=query_start_loc.dtype,
                      out=query_start_loc[1:])
 
+        # Placeholders
+        slot_mapping = torch.empty(0)
+        block_tables = torch.empty(0)
+
         return PlaceholderAttentionMetadata(
             num_prefills=self.num_prefills,
-            slot_mapping=None,
+            slot_mapping=slot_mapping,
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
             seq_lens=seq_lens,
@@ -279,7 +283,7 @@ class PlaceholderAttentionMetadataBuilder(
             query_start_loc=query_start_loc,
             seq_start_loc=seq_start_loc,
             context_lens_tensor=context_lens_tensor,
-            block_tables=None,
+            block_tables=block_tables,
             use_cuda_graph=use_captured_graph,
         )
 
