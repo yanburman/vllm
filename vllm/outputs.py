@@ -7,7 +7,7 @@ from typing import Union
 from vllm.lora.request import LoRARequest
 from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
                            SequenceGroup, SequenceStatus)
-
+from vllm.entrypoints.openai.rpc.pb import generate_pb2
 
 @dataclass
 class CompletionOutput:
@@ -36,6 +36,31 @@ class CompletionOutput:
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
     lora_request: Optional[LoRARequest] = None
+
+    @classmethod
+    def from_pb(cls, pb: generate_pb2.CompletionOutput):
+        cls(
+            index=pb.request_id,
+            text=pb.prompt,
+            token_ids=pb.prompt_token_ids,
+            cumulative_logprob=None,
+            logprobs=None,
+            finish_reason=pb.finish_reason,
+            stop_reason=pb.stop_reason,
+        )
+
+    def to_pb(self):
+        assert self.cumulative_logprob is None
+        assert self.logprobs is None
+        assert self.lora_request is None
+
+        return generate_pb2.CompletionOutput(
+            index=self.index,
+            text=self.text,
+            token_ids=self.token_ids,
+            finish_reason=self.finish_reason,
+            stop_reason=self.stop_reason,
+        )
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -111,6 +136,33 @@ class RequestOutput:
         self.lora_request = lora_request
         self.encoder_prompt = encoder_prompt
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
+
+    @classmethod
+    def from_pb(cls, pb: generate_pb2.RequestOutput):
+        cls(
+            request_id=pb.request_id,
+            prompt=pb.prompt,
+            prompt_token_ids=pb.prompt_token_ids,
+            prompt_logprobs=None,
+            outputs=[CompletionOutput.from_pb(output) for output in pb.outputs],
+            finished=pb.finished,
+        )
+
+    def to_pb(self):
+        assert self.prompt_logprobs is None
+        assert self.metrics is None
+        assert self.lora_request is None
+        assert self.encoder_prompt is None
+        assert self.encoder_prompt_token_ids is None
+
+        return generate_pb2.RequestOutput(
+            request_id=self.request_id,
+            prompt=self.prompt,
+            prompt_token_ids=self.prompt_token_ids,
+            outputs=[output.to_pb() for output in self.outputs],
+            finished=self.finished,
+        )
+
 
     @classmethod
     def from_seq_group(cls, seq_group: SequenceGroup) -> "RequestOutput":

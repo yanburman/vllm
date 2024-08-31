@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+package generate.v1;
+
+message CompletionOutput {
+    uint64 index = 1;
+    string text = 2;
+    repeated uint64 token_ids = 3;
+    string finish_reason = 4;
+    string stop_reason = 5;
+}
+
+message RequestOutput {
+    string request_id = 1;
+    string prompt = 2;
+    repeated uint64 prompt_token_ids = 3;
+    repeated CompletionOutput outputs = 4;
+    bool finished = 5;
+}
+
+message StreamRequestOutput {
+    repeated RequestOutput request_outputs = 1;
+}
