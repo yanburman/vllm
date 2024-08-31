@@ -21,6 +21,7 @@ from vllm.entrypoints.openai.rpc import (RPC_REQUEST_TYPE,
                                          RPCGenerateRequest,
                                          RPCOutputStreamRequest,
                                          RPCUtilityRequest)
+from vllm.entrypoints.openai.rpc.pb import generate_pb2
 # yapf: enable
 from vllm.envs import VLLM_RPC_GET_DATA_TIMEOUT_MS
 from vllm.inputs import PromptInputs
@@ -30,6 +31,7 @@ from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
+from vllm.outputs import StreamRequestOutput
 
 logger = init_logger(__name__)
 
@@ -163,7 +165,10 @@ class AsyncEngineRPCClient:
             # Stream back the results from the RPC Server.
             while True:
                 message: Frame = await socket.recv(copy=False)
-                request_outputs = pickle.loads(message.buffer)
+                # request_outputs = pickle.loads(message.buffer)
+                stream_request_output = generate_pb2.GenerateResponse()
+                stream_request_output.ParseFromString(message.buffer)
+                request_outputs = stream_request_output.request_output
 
                 for output in request_outputs:
                     if isinstance(output, tuple):

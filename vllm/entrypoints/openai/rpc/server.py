@@ -19,8 +19,10 @@ from vllm.entrypoints.openai.rpc import (VLLM_RPC_SUCCESS_STR,
                                          RPCGenerateRequest,
                                          RPCOutputStreamRequest,
                                          RPCUtilityRequest)
+from vllm.outputs import StreamRequestOutput
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
+
 
 logger = init_logger(__name__)
 
@@ -116,8 +118,8 @@ class AsyncEngineRPCServer:
             #     for o in output.outputs:
             #         o.token_ids = [0]
             #         o.text = " word"
-
-            await self.socket.send_multipart((identity, pickle.dumps(outputs)),
+            proto = StreamRequestOutput.to_pb(outputs)
+            await self.socket.send_multipart((identity, proto.SerializeToString()),
                                              copy=False)
 
     async def generate(self, identity, generate_request: RPCGenerateRequest):

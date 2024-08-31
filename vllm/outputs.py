@@ -9,6 +9,8 @@ from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
                            SequenceGroup, SequenceStatus)
 from vllm.entrypoints.openai.rpc.pb import generate_pb2
 
+
+
 @dataclass
 class CompletionOutput:
     """The output data of one completion output of a request.
@@ -289,3 +291,19 @@ class RequestOutputFactory:
             return EmbeddingRequestOutput.from_seq_group(seq_group)
         else:
             return RequestOutput.from_seq_group(seq_group)
+
+
+@dataclass
+class StreamRequestOutput:
+    request_outputs: List[RequestOutput]
+
+    @classmethod
+    def from_pb(cls, pb: generate_pb2.StreamRequestOutput):
+        cls(request_outputs=[RequestOutput.from_pb(request_output) for request_output in pb.request_outputs])
+    
+    @staticmethod
+    def to_pb(self):
+        return generate_pb2.StreamRequesOutput(
+            request_outputs=[request_output.to_pb() for request_output in self.request_outputs]
+        )
+
