@@ -23,7 +23,6 @@ from vllm.outputs import StreamRequestOutput
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 
-
 logger = init_logger(__name__)
 
 CONFIG_TYPE = Union[ModelConfig, DecodingConfig, ParallelConfig,
@@ -109,7 +108,7 @@ class AsyncEngineRPCServer:
     async def stream_outputs(self, identity):
         # This runs indefinitely
         #TODO handle shutdown
-        async for outputs in self.engine.global_output_generator():
+        async for request_outputs in self.engine.global_output_generator():
             # Trim down contents to be equivalent to deltas (other PR for this)
             # for output in outputs:
             #     output.prompt = None
@@ -118,9 +117,14 @@ class AsyncEngineRPCServer:
             #     for o in output.outputs:
             #         o.token_ids = [0]
             #         o.text = " word"
-            proto = StreamRequestOutput.to_pb(outputs)
-            await self.socket.send_multipart((identity, proto.SerializeToString()),
-                                             copy=False)
+            
+            proto = StreamRequestOutput.to_pb(request_outputs)
+            # print("sending...")
+            # print(request_outputs)
+            # print(proto)
+            await self.socket.send_multipart(
+                (identity, proto.SerializeToString()), copy=False)
+            # print("sent!")
 
     async def generate(self, identity, generate_request: RPCGenerateRequest):
         # Empty result to indicate success
@@ -255,6 +259,7 @@ async def run_server(server: AsyncEngineRPCServer):
         # Clean up all resources.
         server.cleanup()
     # prof.write_html("prof-disabled.html", show_all=True)
+
 
 def run_rpc_server(async_engine_args: AsyncEngineArgs,
                    usage_context: UsageContext, rpc_path: str):

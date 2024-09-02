@@ -10,7 +10,6 @@ from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
 from vllm.entrypoints.openai.rpc.pb import generate_pb2
 
 
-
 @dataclass
 class CompletionOutput:
     """The output data of one completion output of a request.
@@ -29,7 +28,6 @@ class CompletionOutput:
             including encountering the EOS token.
         lora_request: The LoRA request that was used to generate the output.
     """
-
     index: int
     text: str
     token_ids: GenericSequence[int]
@@ -41,10 +39,10 @@ class CompletionOutput:
 
     @classmethod
     def from_pb(cls, pb: generate_pb2.CompletionOutput):
-        cls(
-            index=pb.request_id,
-            text=pb.prompt,
-            token_ids=pb.prompt_token_ids,
+        return cls(
+            index=pb.index,
+            text=pb.text,
+            token_ids=pb.token_ids,
             cumulative_logprob=None,
             logprobs=None,
             finish_reason=pb.finish_reason,
@@ -141,18 +139,20 @@ class RequestOutput:
 
     @classmethod
     def from_pb(cls, pb: generate_pb2.RequestOutput):
-        cls(
+        return cls(
             request_id=pb.request_id,
             prompt=pb.prompt,
             prompt_token_ids=pb.prompt_token_ids,
             prompt_logprobs=None,
-            outputs=[CompletionOutput.from_pb(output) for output in pb.outputs],
+            outputs=[
+                CompletionOutput.from_pb(output) for output in pb.outputs
+            ],
             finished=pb.finished,
         )
 
     def to_pb(self):
         assert self.prompt_logprobs is None
-        assert self.metrics is None
+        # assert self.metrics is None
         assert self.lora_request is None
         assert self.encoder_prompt is None
         assert self.encoder_prompt_token_ids is None
@@ -164,7 +164,6 @@ class RequestOutput:
             outputs=[output.to_pb() for output in self.outputs],
             finished=self.finished,
         )
-
 
     @classmethod
     def from_seq_group(cls, seq_group: SequenceGroup) -> "RequestOutput":
@@ -293,17 +292,18 @@ class RequestOutputFactory:
             return RequestOutput.from_seq_group(seq_group)
 
 
-@dataclass
 class StreamRequestOutput:
     request_outputs: List[RequestOutput]
 
     @classmethod
     def from_pb(cls, pb: generate_pb2.StreamRequestOutput):
-        cls(request_outputs=[RequestOutput.from_pb(request_output) for request_output in pb.request_outputs])
-    
-    @staticmethod
-    def to_pb(self):
-        return generate_pb2.StreamRequesOutput(
-            request_outputs=[request_output.to_pb() for request_output in self.request_outputs]
-        )
+        return cls(request_outputs=[
+            RequestOutput.from_pb(request_output)
+            for request_output in pb.request_outputs
+        ])
 
+    @staticmethod
+    def to_pb(request_outputs: List[RequestOutput]):
+        return generate_pb2.StreamRequestOutput(request_outputs=[
+            request_output.to_pb() for request_output in request_outputs
+        ])

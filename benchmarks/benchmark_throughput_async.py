@@ -122,8 +122,8 @@ async def run_vllm(
 
     decoupled = True
 
-    async with build_async_engine_client_from_engine_args(engine_args,
-                                                          not decoupled) as llm:
+    async with build_async_engine_client_from_engine_args(
+            engine_args, not decoupled) as llm:
 
         # Add the requests to the engine.
         prompts: List[str] = []
@@ -247,7 +247,7 @@ def main(args: argparse.Namespace):
                                    args.output_len)
 
     if args.backend == "vllm":
-         coro = run_vllm(
+        coro = run_vllm(
             requests, args.model, args.tokenizer, args.quantization,
             args.tensor_parallel_size, args.seed, args.n, args.use_beam_search,
             args.trust_remote_code, args.dtype, args.max_model_len,
@@ -259,7 +259,7 @@ def main(args: argparse.Namespace):
             args.use_v2_block_manager, args.download_dir, args.load_format,
             args.disable_async_output_proc)
 
-         elapsed_time = uvloop.run(coro)
+        elapsed_time = uvloop.run(coro)
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,

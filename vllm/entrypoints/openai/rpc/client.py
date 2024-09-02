@@ -165,12 +165,14 @@ class AsyncEngineRPCClient:
             # Stream back the results from the RPC Server.
             while True:
                 message: Frame = await socket.recv(copy=False)
+                
                 # request_outputs = pickle.loads(message.buffer)
-                stream_request_output = generate_pb2.GenerateResponse()
+                stream_request_output = generate_pb2.StreamRequestOutput()
                 stream_request_output.ParseFromString(message.buffer)
-                request_outputs = stream_request_output.request_output
 
-                for output in request_outputs:
+                for request_output_pb in stream_request_output.request_outputs:
+                    output = RequestOutput.from_pb(request_output_pb)
+
                     if isinstance(output, tuple):
                         # Exception case
                         request_id, output = output
