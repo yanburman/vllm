@@ -230,7 +230,12 @@ def load_params_config(model, revision) -> PretrainedConfig:
             config_dict = {}
             for key, value in elem.items():
                 key = config_mapping.get(key, key)
-                config_dict[key] = recurse_elems(value)
+
+                # Temporary hack to support Pixtral Fp8
+                if key == "quantization_config":
+                    config_dict[key] = value
+                else:
+                    config_dict[key] = recurse_elems(value)
             return PretrainedConfig(**config_dict)
         else:
             return elem
@@ -251,12 +256,24 @@ def load_params_config(model, revision) -> PretrainedConfig:
     if config_dict.get("vision_encoder") is not None:
         multimodal_config = config_dict.pop("vision_encoder")
 
+        # Temporary hack to support Pixtral Fp8
+        quantization_config = None
+        if config_dict.get("quantization_config") is not None:
+            quantization_config = config_dict.pop(
+                "quantization_config")
+
         config_dict = {
             "text_config": config_dict,
             "vision_config": multimodal_config
         }
+        
+        # Temporary hack to support Pixtral Fp8
+        if quantization_config is not None:
+            config_dict["quantization_config"] = quantization_config
+
         config_dict["architectures"] = ["PixtralForConditionalGeneration"]
         config_dict["model_type"] = "pixtral"
+        
 
     config = recurse_elems(config_dict)
     return config

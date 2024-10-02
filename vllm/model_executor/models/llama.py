@@ -587,13 +587,16 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA):
         mapping = self.mistral_mapping
         modules = name.split(".")
 
-        # rotary embeds should be sliced
-        if "wk" in modules:
-            loaded_weight = permute(loaded_weight,
-                                    self.config.num_key_value_heads)
-        elif "wq" in modules:
-            loaded_weight = permute(loaded_weight,
-                                    self.config.num_attention_heads)
+        # Condition is a temporary hack to support Pixtral Fp8
+        if "weight_scale" not in modules:
+
+            # rotary embeds should be sliced
+            if "wk" in modules:
+                loaded_weight = permute(loaded_weight,
+                                        self.config.num_key_value_heads)
+            elif "wq" in modules:
+                loaded_weight = permute(loaded_weight,
+                                        self.config.num_attention_heads)
 
         for item in modules:
             if item in mapping and mapping[item] not in name:
