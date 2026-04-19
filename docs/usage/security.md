@@ -181,11 +181,14 @@ This endpoint is **only available when the `--enable-tokenizer-info-endpoint` fl
 
 - `/tokenizer_info` - Get comprehensive tokenizer information including chat templates and configuration
 
+**Server info endpoint (always available):**
+
+- `/server_info` - Get detailed server configuration
+
 **Development endpoints (only when `VLLM_SERVER_DEV_MODE=1`):**
 
 These endpoints are **only available when the environment variable `VLLM_SERVER_DEV_MODE` is set to `1`**. They are intended for development and debugging purposes and should never be enabled in production:
 
-- `/server_info` - Get detailed server configuration
 - `/reset_prefix_cache` - Reset prefix cache (can disrupt service)
 - `/reset_mm_cache` - Reset multimodal cache (can disrupt service)
 - `/reset_encoder_cache` - Reset encoder cache (can disrupt service)
@@ -211,7 +214,7 @@ An attacker who can reach the vLLM HTTP server can:
 2. **Cause denial of service** by calling `/pause` or `/scale_elastic_ep` without a token
 3. **Access operational controls** to manipulate server state (e.g., pausing generation)
 4. **If `--enable-tokenizer-info-endpoint` is set:** Access sensitive tokenizer configuration including chat templates, which may reveal prompt engineering strategies or other implementation details
-5. **If `VLLM_SERVER_DEV_MODE=1` is set:** Execute arbitrary RPC commands via `/collective_rpc`, reset caches, put the engine to sleep, and access detailed server configuration
+5. **If `VLLM_SERVER_DEV_MODE=1` is set:** Execute arbitrary RPC commands via `/collective_rpc`, reset caches, and put the engine to sleep
 
 ### Recommended Security Practices
 
@@ -221,7 +224,6 @@ An attacker who can reach the vLLM HTTP server can:
 
 - Arbitrary RPC execution via `/collective_rpc`
 - Cache manipulation that can disrupt service
-- Detailed server configuration disclosure
 
 Similarly, never enable profiler endpoints in production.
 
